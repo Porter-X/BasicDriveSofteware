@@ -7,6 +7,7 @@
 #define W25Q128ReadData 0x03
 #define W25Q128WriteData 0x02
 #define W25Q128ReadStatusRegister 0x05
+#define W25Q128EraseSector 0x20
 
 u8 mySPI1_ReadWriteByte(u8 Txdata)
 {
@@ -42,9 +43,9 @@ u8 W25Q128_ReadSR()
 	W25QXX_CS = 1; 
     return temp;   
 }
+
 void W25Q128_Wait_Busy()
 {
-    u8 temp = 0;
 /*     while (1)
     {
         temp = mySPI1_ReadWriteByte(W25Q128ReadStatusRegister);
@@ -61,20 +62,113 @@ void W25Q128_Write_Page(u8* pBuffer, u32 addr, u16 numberToWrite)
     W25Q128_Write_Enable();//写使能
     W25QXX_CS = 0;//片选
     mySPI1_ReadWriteByte(W25Q128WriteData);//写命令
-    mySPI1_ReadWriteByte((u8)addr >> 16);//地址
-    mySPI1_ReadWriteByte((u8)addr >> 8);
+    mySPI1_ReadWriteByte((u8)(addr >> 16));//地址
+    mySPI1_ReadWriteByte((u8)(addr >> 8));
     mySPI1_ReadWriteByte((u8)addr);
     for (i = 0; i < numberToWrite; i++)
         mySPI1_ReadWriteByte(pBuffer[i]);
-    W25Q128_Wait_Busy();
     W25QXX_CS = 1;//取消片选    
+	W25QXX_Wait_Busy();					   //等待写入结束
 }
 
-//扇区sector为FLASH擦除的最小单位
+//扇区sector为FLASH擦除的最小单位 numberToWrite max 4096
 void W25Q128_Write_Sector(u8* pBuffer, u32 addr, u16 numberToWrite)
 {
-    
+    //int pagePos = addr/256;
+	//int pageOffset = addr%256;
+	int pageRemain = 256 - addr%256;
+	if (numberToWrite < pageRemain)
+		pageRemain = numberToWrite;
+	while (1)
+	{
+		W25Q128_Write_Page(pBuffer, addr, pageRemain);//写满一页
+		if (pageRemain == numberToWrite) break;
+		else
+		{
+			pBuffer += pageRemain;
+			addr += pageRemain;
+			numberToWrite -=pageRemain;
+			if (numberToWrite > 256)
+				pageRemain = 256;
+			else
+				pageRemain = numberToWrite;
+		}
+
+	}
 }
+
+//擦除一个扇区，时间为多长？
+void W25Q128_Erase_Sector(u32 addr)
+{
+	W25Q128_Write_Enable();//写使能
+	W25Q128_Wait_Busy();
+	W25QXX_CS = 0;
+	mySPI1_ReadWriteByte(W25Q128EraseSector);
+    mySPI1_ReadWriteByte((u8)addr >> 16);//地址
+    mySPI1_ReadWriteByte((u8)addr >> 8);
+    mySPI1_ReadWriteByte((u8)addr);
+	W25QXX_CS = 1;
+	W25Q128_Wait_Busy();//等待擦除扇区
+
+}
+
+u8 writeBuf[4096];
+//写Flash W25Q128 max 65536bytes 1 block
+void W25Q128_Write_Block(u8* pBuffer, u32 addr, u16 numberToWrite)
+{
+	int i;
+	int secPos = addr / 4096;
+	int secOffset = addr % 4096;
+	int secRemain = 4096 - secOffset;
+	if (numberToWrite < secRemain)
+		secRemain = numberToWrite;
+	while (1)
+	{
+		//需要判断整个扇区是否被写过
+		//先把扇区数据读入buf
+		W25Q128_Read(writeBuf, secPos*4096, 4096);
+		//判断
+		for  (i = 0; i < secRemain; i++)
+		{
+			if (writeBuf[secOffset + i] != 0xFF)
+				break;//Flash中有保存其他数据，需要擦除
+		}
+		if (i < secRemain)//跳出了循环
+		{
+			//擦除扇区
+			W25Q128_Erase_Sector(secPos*4096);
+			//数据填入buf
+			for  (i = 0; i < secRemain; i++)
+			{
+				writeBuf[secOffset + i] = pBuffer[i];			
+			}
+			//填充扇区
+			W25Q128_Write_Sector(writeBuf, secPos*4096, 4096);
+
+		}
+		else
+		{
+			W25Q128_Write_Sector(pBuffer, addr, secRemain);
+		}
+		if (numberToWrite == secRemain)
+			break;
+		else
+		{
+			//偏移计算
+			secPos += 1;//扇区偏移
+			secOffset = 0;
+			numberToWrite -= secRemain; //写的字节数递减
+			pBuffer +=secRemain; 	//指针偏移
+			addr += secRemain;		//地址偏移
+			if (numberToWrite < 4096)//下一扇区可以写完
+				secRemain = numberToWrite;
+			else
+				secRemain = 4096;
+		}
+
+	}
+}
+
 
 void W25Q128_Read(u8* pBuffer, u32 addr, u16 size)
 {
@@ -90,4 +184,39 @@ void W25Q128_Read(u8* pBuffer, u32 addr, u16 size)
 		pBuffer[i] = mySPI1_ReadWriteByte(0xff);//任意数据
 	}
 	W25QXX_CS = 1;
+}
+
+
+
+//W25Q128写一页数据,page 为Flash的最小单位
+void W25Q128_Write_Page(u8* pBuffer, u32 addr, u16 numberToWrite)
+{
+    int i;
+    W25QXX_Write_Enable();//写使能
+    W25QXX_CS = 0;//片选
+    SPI1_ReadWriteByte(W25Q128WriteData);//写命令
+    SPI1_ReadWriteByte((u8)addr >> 16);//地址
+    SPI1_ReadWriteByte((u8)addr >> 8);
+    SPI1_ReadWriteByte((u8)addr);
+    for (i = 0; i < numberToWrite; i++)
+        SPI1_ReadWriteByte(pBuffer[i]);
+
+    W25QXX_CS = 1;//取消片选    
+	  W25QXX_Wait_Busy();
+}
+
+//W25Q128写一页数据,page 为Flash的最小单位
+void W25Q128_Write_Page(u8* pBuffer, u32 addr, u16 numberToWrite)
+{
+ 	u16 i;  
+    W25Q128_Write_Enable();                  //SET WEL 
+	W25QXX_CS=0;                            //使能器件   
+    mySPI1_ReadWriteByte(W25X_PageProgram);      //发送写页命令   
+	mySPI1_ReadWriteByte(addr >> 16);//地址
+	mySPI1_ReadWriteByte(addr >> 8);
+	mySPI1_ReadWriteByte(addr);  
+    for (i = 0; i < numberToWrite; i++)
+        mySPI1_ReadWriteByte(pBuffer[i]);
+	W25QXX_CS=1;                            //取消片选 
+	W25QXX_Wait_Busy();					   //等待写入结束
 }
